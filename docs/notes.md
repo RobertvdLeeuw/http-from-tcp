@@ -35,6 +35,7 @@
     - User-agent (user identifiers)
     - Content-type (application/json, etc)
     - Content-length in bytes (or chunked stuff)
+      - If no Content-length, just assume no body
   - Ends metadata 'segment' with '/r/n/r/n' (empty line)
 - HTTP/1.1 vs 2/3
   - Hpack/QPack (look into)

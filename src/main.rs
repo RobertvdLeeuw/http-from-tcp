@@ -1,5 +1,4 @@
 use regex::{Captures, Regex};
-use std::collections::btree_map::Values;
 use std::io::{Error, Read};
 use std::net::{TcpListener, TcpStream};
 
@@ -29,6 +28,7 @@ impl HTTPError {
 }
 
 enum RequestType {
+    Head,
     Get,
     Post,
 }
@@ -36,6 +36,7 @@ enum RequestType {
 impl RequestType {
     fn to_string(&self) -> String {
         match self {
+            RequestType::Head => "HEAD",
             RequestType::Get => "GET",
             RequestType::Post => "POST",
         }
@@ -66,6 +67,7 @@ enum Header {
     ContentLength(usize),
     AcceptLanguage(String),
     Authorization(String),
+    UserAgent(String),
     Host(String),
 }
 
@@ -77,6 +79,7 @@ impl Header {
             Header::AcceptLanguage(query) => format!("Accept-Language: {}", query),
             Header::Authorization(query) => format!("Authorization: {}", query),
             Header::Host(query) => format!("Host: {}", query),
+            Header::UserAgent(query) => format!("User-Agent: {}", query),
         }
         .to_string()
     }
@@ -106,7 +109,10 @@ impl Request {
 fn parse_header_line(line: &str) -> Result<Header, HTTPError> {
     let header_regex = Regex::new(r"^([a-zA-Z\-]+): +(.*)$").unwrap();
     let Some((_, [field, value])) = header_regex.captures(line).map(|caps| caps.extract()) else {
-        return Err(HTTPError::new(HTTPErrorKind::BadHeader, "Invalid format"));
+        return Err(HTTPError::new(
+            HTTPErrorKind::BadHeader,
+            format!("Invalid format: '{}'", line),
+        ));
     };
 
     Ok(match field {
@@ -115,6 +121,7 @@ fn parse_header_line(line: &str) -> Result<Header, HTTPError> {
         "Accept-Language" => Header::AcceptLanguage(field.to_string()),
         "Authorization" => Header::Authorization(field.to_string()),
         "Host" => Header::Host(field.to_string()),
+        "User-Agent" => Header::UserAgent(field.to_string()),
 
         "Content-Length" => match value.parse::<usize>() {
             Ok(l) => Header::ContentLength(l),
@@ -124,14 +131,14 @@ fn parse_header_line(line: &str) -> Result<Header, HTTPError> {
         _ => {
             return Err(HTTPError::new(
                 HTTPErrorKind::BadHeader,
-                "Unsupported header",
+                format!("Unsupported header '{}'", field),
             ));
         }
     })
 }
 
 fn parse_headers(text: &str) -> Result<(RequestLine, Vec<Header>), HTTPError> {
-    let lines = text.split("\n").collect::<Vec<&str>>();
+    let lines = text.split("\r\n").collect::<Vec<&str>>();
 
     let parts = lines[0]
         .split(" ")
@@ -146,12 +153,21 @@ fn parse_headers(text: &str) -> Result<(RequestLine, Vec<Header>), HTTPError> {
         (_, _, version) if version != "HTTP/1.1" => {
             return Err(HTTPError::new(
                 HTTPErrorKind::UnsupportedVersion,
-                "Only HTTP/1.1 is supported",
+                format!("Only HTTP/1.1 is supported, not '{}'", version),
             ));
         }
         (_, location, _) if !location.starts_with("/") => {
-            return Err(HTTPError::new(HTTPErrorKind::BadHeader, "Invalid location"));
+            return Err(HTTPError::new(
+                HTTPErrorKind::BadHeader,
+                format!("Invalid location: '{}'", location),
+            ));
         }
+
+        ("HEAD", loc, ver) => RequestLine {
+            method: RequestType::Head,
+            location: loc.to_string(),
+            version: ver.to_string(),
+        },
         ("GET", loc, ver) => RequestLine {
             method: RequestType::Get,
             location: loc.to_string(),
@@ -166,10 +182,10 @@ fn parse_headers(text: &str) -> Result<(RequestLine, Vec<Header>), HTTPError> {
         _ => return Err(HTTPError::new(HTTPErrorKind::BadHeader, "Malformed header")),
     };
 
-    let headers: Vec<Header> = lines[1..]
+    let headers: Vec<Header> = lines[1..lines.len() - 3]
         .iter()
         .map(|l| parse_header_line(l))
-        .collect::<Vec<Result<Header, HTTPError>>>()?;
+        .collect::<Result<Vec<Header>, HTTPError>>()?;
 
     Ok((reqline, headers))
 }
@@ -178,15 +194,13 @@ fn handle_connection(stream: &mut TcpStream) {
     let mut buf = [0; BUF_SIZE];
 
     let mut msg = Vec::<u8>::new();
-    let mut header_end: usize;
+    let mut header_end: usize = 0;
     let mut msg_total_length: usize = 0;
 
     // Not the cleanest, but I'd prefer everything ready before Request init so it can all be
     // immutable.
-    let mut request_line: RequestLine;
-    let mut headers: Vec<Header>;
-
-    let mut request: Request;
+    let mut request_line: Option<RequestLine> = None;
+    let mut headers: Option<Vec<Header>> = None;
 
     loop {
         let length = match stream.read(&mut buf) {
@@ -208,31 +222,36 @@ fn handle_connection(stream: &mut TcpStream) {
 
         if let Some(idx) = msg.windows(4).position(|w| w == HEADER_END) {
             header_end = idx + 4;
-            (request_line, headers) = parse_headers(
+
+            let (rq, head) = parse_headers(
                 str::from_utf8(&msg[..header_end]).expect("Failed to parse header bytes."),
             )
-            .expect("Bad headers");
-            // What's common for invalid headers? error response?
+            .unwrap();
 
-            if let Some(Header::ContentLength(body_length)) = headers
-                .iter()
-                .find(|h| matches!(h, Header::ContentLength(_)))
+            if let Some(Header::ContentLength(body_length)) =
+                head.iter().find(|h| matches!(h, Header::ContentLength(_)))
             {
-                msg_total_length = header_end + body_length
+                msg_total_length = header_end + body_length;
+
+                request_line = Some(rq);
+                headers = Some(head);
             } else {
                 msg_total_length = header_end;
+
+                request_line = Some(rq);
+                headers = Some(head);
                 break;
             };
-
-            request = Request {
-                request_line,
-                headers,
-                body: msg[header_end..].to_vec(),
-            };
-
-            println!("Final message: {}", request.to_string())
         }
     }
+
+    let request = Request {
+        request_line: request_line.expect("No request line?"),
+        headers: headers.expect("No headers?"),
+        body: msg[header_end..].to_vec(),
+    };
+
+    println!("Final message: {}", request.to_string())
 }
 
 fn main() {

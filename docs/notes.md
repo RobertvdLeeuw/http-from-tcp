@@ -40,6 +40,8 @@
 - HTTP/1.1 vs 2/3
   - Hpack/QPack (look into)
 
+## Loop
+
 # Code specific stuff
 
 - Definitely a request struct

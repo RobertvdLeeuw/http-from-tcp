@@ -1,4 +1,4 @@
-use regex::{Captures, Regex};
+use regex::Regex;
 use std::io::{Error, ErrorKind, Read};
 use std::net::{TcpListener, TcpStream};
 
@@ -8,22 +8,27 @@ use types::{HTTPError, HTTPErrorKind, Header, Request, RequestType};
 const BUF_SIZE: usize = 12;
 const HEADER_END: &[u8] = b"\r\n\r\n";
 
+// TODO:
+// Response struct
+// Header validation
+// Keepalive loop
+
 fn parse_header_line(line: &str) -> Result<Header, HTTPError> {
-    let header_regex = Regex::new(r"^([a-zA-Z\-]+): +(.*)$").unwrap();
-    let Some((_, [field, value])) = header_regex.captures(line).map(|caps| caps.extract()) else {
+    let re_header = Regex::new(r"^([a-zA-Z\-]+): +(.*)$").unwrap();
+    let Some((_, [field, value])) = re_header.captures(line).map(|caps| caps.extract()) else {
         return Err(HTTPError::new(
             HTTPErrorKind::BadHeader,
-            format!("Invalid format: '{}'", line),
+            format!("Invalid format: '{line}'"),
         ));
     };
 
-    Ok(match field {
-        // TODO: Further value validation.
+    let header = match field {
         "Accept" => Header::Accept(field.to_string()),
         "Accept-Language" => Header::AcceptLanguage(field.to_string()),
         "Authorization" => Header::Authorization(field.to_string()),
         "Host" => Header::Host(field.to_string()),
         "User-Agent" => Header::UserAgent(field.to_string()),
+        "Connection" => Header::Connection(field.to_string()),
 
         "Content-Length" => match value.parse::<usize>() {
             Ok(l) => Header::ContentLength(l),
@@ -33,10 +38,15 @@ fn parse_header_line(line: &str) -> Result<Header, HTTPError> {
         _ => {
             return Err(HTTPError::new(
                 HTTPErrorKind::BadHeader,
-                format!("Unsupported header '{}'", field),
+                format!("Unsupported header '{field}'"),
             ));
         }
-    })
+    };
+
+    match header.validate() {
+        Ok(_) => Ok(header),
+        Err(e) => Err(e),
+    }
 }
 
 fn parse_headers(text: &str) -> Result<(RequestType, String, String, Vec<Header>), HTTPError> {
@@ -55,13 +65,13 @@ fn parse_headers(text: &str) -> Result<(RequestType, String, String, Vec<Header>
         (_, _, ver) if ver != "HTTP/1.1" => {
             return Err(HTTPError::new(
                 HTTPErrorKind::UnsupportedVersion,
-                format!("Only HTTP/1.1 is supported, not '{}'", ver),
+                format!("Only HTTP/1.1 is supported, not '{ver}'"),
             ));
         }
         (_, pth, _) if !pth.starts_with("/") => {
             return Err(HTTPError::new(
                 HTTPErrorKind::BadHeader,
-                format!("Invalid location: '{}'", pth),
+                format!("Invalid location: '{pth}'"),
             ));
         }
 

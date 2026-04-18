@@ -1,3 +1,4 @@
+use regex::Regex;
 use std::error;
 use std::fmt;
 use std::io::Error;
@@ -80,6 +81,7 @@ pub enum Header {
     Authorization(String),
     UserAgent(String),
     Host(String),
+    Connection(String),
 }
 
 impl fmt::Display for Header {
@@ -91,9 +93,98 @@ impl fmt::Display for Header {
             Header::Authorization(query) => format!("Authorization: {}", query),
             Header::Host(query) => format!("Host: {}", query),
             Header::UserAgent(query) => format!("User-Agent: {}", query),
+            Header::Connection(conntype) => format!("Connection: {}", conntype),
         };
 
         write!(f, "{}", formatted)
+    }
+}
+
+impl Header {
+    pub fn validate(&self) -> Result<(), HTTPError> {
+        let re_token = Regex::new(r"[a-zA-Z0-9!#$%&'*+\-.^_`|~]").unwrap();
+        let re_param = Regex::new(&format!(r"({re_token}+={re_token}+)")).unwrap();
+
+        match self {
+            Header::Accept(query) => {
+                let re_mime_type = format!(r"(\*|{re_token}+)");
+                let re_media_range =
+                    Regex::new(&format!(r"{re_mime_type}/{re_mime_type}(; ?{re_param})+")).unwrap();
+                let re_accept_value =
+                    Regex::new(&format!(r"^{re_media_range}( ?, ?{re_media_range})*$")).unwrap();
+
+                if !re_accept_value.is_match(query) {
+                    for specifier in query.split(",").collect::<Vec<&str>>() {
+                        if !re_media_range.is_match(specifier) {
+                            return Err(HTTPError::new(
+                                HTTPErrorKind::BadHeader,
+                                format!("Invalid accept field specifier: '{specifier}'"),
+                            ));
+                        }
+                    }
+                }
+            }
+            Header::Host(query) => {
+                let re_255 = r"(2[0-5][0-5])|(1?[0-9]{1,2})";
+                let re_ip = format!(r"{re_255}.{re_255}.{re_255}.{re_255}");
+
+                let re_regname = r"[a-zA-Z0-9\.-_~]+";
+                let re_port = r"([1-5]?[0-9]{1,4})|(6[0-5][0-5][0-3][0-5])";
+                let re_host_value =
+                    Regex::new(&format!(r"^({re_ip})|({re_regname})(:{re_port})?$")).unwrap();
+
+                if !re_host_value.is_match(query) {
+                    return Err(HTTPError::new(
+                        HTTPErrorKind::BadHeader,
+                        format!("Invalid host: '{query}'"),
+                    ));
+                }
+            }
+            Header::AcceptLanguage(query) => {
+                let re_lang_option =
+                    Regex::new(&format!(r"{re_token}{{2,}}(; ?{re_param})*")).unwrap();
+                let re_lang_value =
+                    Regex::new(&format!(r"^{re_lang_option}( ?, ?{re_lang_option})*$")).unwrap();
+
+                if !re_lang_value.is_match(query) {
+                    for specifier in query.split(", ").collect::<Vec<&str>>() {
+                        if !re_lang_option.is_match(specifier) {
+                            return Err(HTTPError::new(
+                                HTTPErrorKind::BadHeader,
+                                format!("Invalid language specifier: '{specifier}'"),
+                            ));
+                        }
+                    }
+                }
+            }
+            Header::Connection(conntype) => {
+                if conntype != "keep-alive" && conntype != "close" {
+                    return Err(HTTPError::new(
+                        HTTPErrorKind::BadHeader,
+                        format!("Invalid connection type: '{conntype}'"),
+                    ));
+                }
+            }
+            Header::UserAgent(query) => {
+                let re_product = Regex::new(&format!(r"{re_token}+(/{re_token}+)?")).unwrap();
+                // TODO: Comments in user agent.
+                let re_user_agent_value =
+                    Regex::new(&format!(r"{re_product}( {re_product})*")).unwrap();
+
+                if !re_user_agent_value.is_match(query) {
+                    for specifier in query.split(" ").collect::<Vec<&str>>() {
+                        if !re_product.is_match(specifier) {
+                            return Err(HTTPError::new(
+                                HTTPErrorKind::BadHeader,
+                                format!("Invalid user agent: '{specifier}'"),
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {} // No string validation needed.
+        }
+        Ok(())
     }
 }
 
@@ -102,7 +193,7 @@ pub struct Request {
     pub path: String,
     pub version: String,
 
-    pub headers: Vec<Header>,
+    pub headers: Vec<Header>, // TODO: Hash table
     pub body: Vec<u8>,
 }
 

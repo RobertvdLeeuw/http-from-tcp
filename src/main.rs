@@ -6,11 +6,12 @@ use std::net::{TcpListener, TcpStream};
 mod types;
 use types::{HTTPError, HTTPErrorKind, Header, Request, RequestType, Response};
 
+use log::{debug, error, info, warn};
+
 const BUF_SIZE: usize = 12;
 const HEADER_END: &[u8] = b"\r\n\r\n";
 
 // TODO:
-// Response struct
 // Keepalive loop
 // Tests
 //  Serialize-deserialize loop
@@ -120,6 +121,8 @@ fn get_request(stream: &mut TcpStream) -> Result<Request, Error> {
     ) = loop {
         let length = stream.read(&mut buf)?;
         if length == 0 {
+            warn!(target: "warning_low", "Stream ended before CRLF.");
+
             // TODO: BrokenPipe the right kind?
             return Err(Error::new(
                 ErrorKind::BrokenPipe,
@@ -131,16 +134,32 @@ fn get_request(stream: &mut TcpStream) -> Result<Request, Error> {
 
         if let Some(idx) = msg.windows(4).position(|w| w == HEADER_END) {
             let header_end = idx + 4;
-            let (mthd, pth, ver, hdrs) = parse_headers(
-                str::from_utf8(&msg[..header_end]).expect("Failed to parse header bytes."),
-            )?;
+
+            let req_start = match str::from_utf8(&msg[..header_end]) {
+                Ok(s) => s,
+                Err(_) => {
+                    warn!(target: "warning_low", "Unable to parse header bytes");
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "Unable to parse header bytes",
+                    ));
+                }
+            };
+            let (mthd, pth, ver, hdrs) = parse_headers(req_start)?;
             break (header_end, mthd, pth, ver, hdrs);
         }
     };
+    debug!("Received + parsed headers.");
 
     let body_length: usize = match headers.get("Content-Length") {
-        Some(Header::ContentLength(len)) => *len,
-        _ => 0,
+        Some(Header::ContentLength(len)) => {
+            debug!("Expecting body of {len} bytes");
+            *len
+        }
+        _ => {
+            debug!("No body (expected)");
+            0
+        }
     };
 
     while msg.len() < header_end + body_length {
@@ -150,6 +169,8 @@ fn get_request(stream: &mut TcpStream) -> Result<Request, Error> {
         }
         msg.extend(&buf[..length]);
     }
+    // TODO: Assert expected len = actual len?
+    debug!("Received body");
 
     let body = msg[header_end..].to_vec();
 
@@ -162,13 +183,21 @@ fn get_request(stream: &mut TcpStream) -> Result<Request, Error> {
     })
 }
 
-// fn form_response(request: &Request) -> Response {}
+fn form_response(request: &Request) -> Response {
+    Response {
+        version: "HTTP/1.1".to_string(),
+        status_code: 200,
+        headers: HashMap::new(),
+        body: vec![],
+    }
+}
 
 fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
     loop {
         let request = match get_request(stream) {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) => {
+                info!("Bad request, sending 400: {e}");
                 let response = Response {
                     version: "HTTP/1.1".to_string(),
                     status_code: 400,
@@ -179,21 +208,18 @@ fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
                 break; // What if keepalive in broken request?
             }
         };
+        debug!("Valid request received, processing");
 
-        let response = Response {
-            version: "HTTP/1.1".to_string(),
-            status_code: 200,
-            headers: HashMap::new(),
-            body: vec![],
-        };
+        let response = form_response(&request);
         stream.write_all(response.to_string().as_bytes());
 
         let connection_type = match request.headers.get("Connection") {
             Some(Header::Connection(conntype)) => conntype,
-            _ => "close",
+            _ => "keep-alive",
         };
 
         if connection_type == "close" {
+            info!("Closing connection");
             break; // What if keepalive in broken request?
         }
     }
@@ -202,6 +228,10 @@ fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter("debug,warning_low=warn,warning_recovery=warn")
+        .init();
+
     // let mut f = File::open("./tmp/tmp.txt").expect("Failed to open file.");
 
     let listener = match TcpListener::bind("127.0.0.1:40000") {
@@ -210,6 +240,7 @@ fn main() {
     };
 
     for stream in listener.incoming() {
+        info!("Received new connection.");
         let _result = match stream {
             Ok(mut s) => handle_connection(&mut s),
             Err(e) => panic!("{}", e),

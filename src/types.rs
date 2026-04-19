@@ -1,3 +1,5 @@
+use chrono::Date;
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use std::collections::HashMap;
 use std::error;
@@ -76,15 +78,22 @@ impl RequestType {
 }
 
 pub enum Header {
+    // Request
     Accept(String),
-    ContentLength(usize),
     AcceptLanguage(String),
     Authorization(String),
     UserAgent(String),
+
+    // Response
+    Location(String),
+
+    // Both
+    ContentLength(usize),
     Host(String),
     Connection(String),
-    Location(String),
     ContentType(String),
+    Date(DateTime<Utc>),
+    TransferEncoding(String),
 }
 
 impl fmt::Display for Header {
@@ -99,6 +108,8 @@ impl fmt::Display for Header {
             Header::Connection(conntype) => conntype,
             Header::Location(query) => query,
             Header::ContentType(query) => query,
+            Header::Date(date) => &date.format("%a, %d %b %Y %H:%M:%S %Z").to_string(),
+            Header::TransferEncoding(query) => query,
         };
 
         write!(f, "{}: {}", self.get_kind(), field)
@@ -203,6 +214,8 @@ impl Header {
             Header::Connection(_) => "Connection",
             Header::Location(_) => "Location",
             Header::ContentType(_) => "Content-Type",
+            Header::Date(_) => "Date",
+            Header::TransferEncoding(_) => "Transfer-Encoding",
         }
         .to_string()
     }

@@ -1,7 +1,9 @@
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 
 mod types;
 use types::{HTTPError, HTTPErrorKind, Header, Request, RequestType, Response};
@@ -12,7 +14,6 @@ const BUF_SIZE: usize = 12;
 const HEADER_END: &[u8] = b"\r\n\r\n";
 
 // TODO:
-// Keepalive loop
 // Tests
 //  Serialize-deserialize loop
 
@@ -75,12 +76,6 @@ fn parse_headers(
     }
 
     let (reqtype, path, version) = match (parts[0], parts[1], parts[2]) {
-        (_, _, ver) if ver != "HTTP/1.1" => {
-            return Err(HTTPError::new(
-                HTTPErrorKind::UnsupportedVersion,
-                format!("Only HTTP/1.1 is supported, not '{ver}'"),
-            ));
-        }
         (_, pth, _) if !pth.starts_with("/") => {
             return Err(HTTPError::new(
                 HTTPErrorKind::BadHeader,
@@ -108,7 +103,7 @@ fn parse_headers(
     Ok((reqtype, path, version, headers))
 }
 
-fn get_request(stream: &mut TcpStream) -> Result<Request, Error> {
+fn get_request(stream: &mut TcpStream) -> Result<Option<Request>, Error> {
     let mut buf = [0; BUF_SIZE];
 
     let mut msg = Vec::<u8>::new();
@@ -119,14 +114,20 @@ fn get_request(stream: &mut TcpStream) -> Result<Request, Error> {
         String,
         HashMap<String, Header>,
     ) = loop {
-        let length = stream.read(&mut buf)?;
+        let length = match stream.read(&mut buf) {
+            Ok(len) => len,
+            Err(_) => return Ok(None),
+        };
         if length == 0 {
-            warn!(target: "warning_low", "Stream ended before CRLF.");
+            if msg.is_empty() {
+                debug!("Received TCP connection close signal (0 byte message)");
+                return Ok(None);
+            }
 
-            // TODO: BrokenPipe the right kind?
+            warn!("Stream ended before CRLF");
             return Err(Error::new(
-                ErrorKind::BrokenPipe,
-                "Message ended before header construction.",
+                ErrorKind::UnexpectedEof,
+                "Connection closed mid-request",
             ));
         }
 
@@ -165,37 +166,78 @@ fn get_request(stream: &mut TcpStream) -> Result<Request, Error> {
     while msg.len() < header_end + body_length {
         let length = stream.read(&mut buf)?;
         if length == 0 {
-            break;
+            if msg.len() == header_end + body_length {
+                break;
+            }
+
+            warn!("Stream ended before expected body length");
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "Connection closed mid-request",
+            ));
         }
         msg.extend(&buf[..length]);
     }
-    // TODO: Assert expected len = actual len?
-    debug!("Received body");
+
+    if body_length > 0 {
+        debug!("Received body");
+    }
 
     let body = msg[header_end..].to_vec();
 
-    Ok(Request {
+    Ok(Some(Request {
         method,
         path,
         version,
         headers,
         body,
-    })
+    }))
 }
 
 fn form_response(request: &Request) -> Response {
+    let headers = HashMap::from([("Date".to_string(), Header::Date(Utc::now()))]);
+
+    if request.version != "HTTP/1.1" {
+        info!("Request for unsupported HTTP version: {}", request.version);
+        return Response {
+            version: "HTTP/1.1".to_string(),
+            status_code: 505,
+            headers,
+            body: vec![],
+        };
+    }
+
+    if request.headers.contains_key("Transfer-Encoding") {
+        info!("Request with chunked data");
+        return Response {
+            version: "HTTP/1.1".to_string(),
+            status_code: 501,
+            headers,
+            body: vec![],
+        };
+    }
+
     Response {
         version: "HTTP/1.1".to_string(),
         status_code: 200,
-        headers: HashMap::new(),
+        headers,
         body: vec![],
     }
 }
 
 fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+
     loop {
         let request = match get_request(stream) {
-            Ok(r) => r,
+            Ok(Some(r)) => r,
+
+            Ok(None) => {
+                // Clean connection end.
+                info!("Closing connection");
+                break;
+            }
+
             Err(e) => {
                 info!("Bad request, sending 400: {e}");
                 let response = Response {
@@ -205,7 +247,7 @@ fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
                     body: vec![],
                 };
                 stream.write_all(response.to_string().as_bytes());
-                break; // What if keepalive in broken request?
+                break; // Close connection on broken request.
             }
         };
         debug!("Valid request received, processing");
@@ -222,15 +264,15 @@ fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
             info!("Closing connection");
             break; // What if keepalive in broken request?
         }
+
+        debug!("Keeping connection alive");
     }
 
     Ok(())
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("debug,warning_low=warn,warning_recovery=warn")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("debug").init();
 
     // let mut f = File::open("./tmp/tmp.txt").expect("Failed to open file.");
 
@@ -241,7 +283,7 @@ fn main() {
 
     for stream in listener.incoming() {
         info!("Received new connection.");
-        let _result = match stream {
+        let _ = match stream {
             Ok(mut s) => handle_connection(&mut s),
             Err(e) => panic!("{}", e),
         };

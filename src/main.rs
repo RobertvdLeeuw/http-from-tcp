@@ -1,17 +1,19 @@
 use regex::Regex;
-use std::io::{Error, ErrorKind, Read};
+use std::collections::HashMap;
+use std::io::{Error, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 mod types;
-use types::{HTTPError, HTTPErrorKind, Header, Request, RequestType};
+use types::{HTTPError, HTTPErrorKind, Header, Request, RequestType, Response};
 
 const BUF_SIZE: usize = 12;
 const HEADER_END: &[u8] = b"\r\n\r\n";
 
 // TODO:
 // Response struct
-// Header validation
 // Keepalive loop
+// Tests
+//  Serialize-deserialize loop
 
 fn parse_header_line(line: &str) -> Result<Header, HTTPError> {
     let re_header = Regex::new(r"^([a-zA-Z\-]+): +(.*)$").unwrap();
@@ -32,7 +34,12 @@ fn parse_header_line(line: &str) -> Result<Header, HTTPError> {
 
         "Content-Length" => match value.parse::<usize>() {
             Ok(l) => Header::ContentLength(l),
-            Err(_) => return Err(HTTPError::new(HTTPErrorKind::BadHeader, "Malformed value")),
+            Err(_) => {
+                return Err(HTTPError::new(
+                    HTTPErrorKind::BadHeader,
+                    format!("Malformed content length value: '{value}'"),
+                ));
+            }
         },
 
         _ => {
@@ -49,7 +56,9 @@ fn parse_header_line(line: &str) -> Result<Header, HTTPError> {
     }
 }
 
-fn parse_headers(text: &str) -> Result<(RequestType, String, String, Vec<Header>), HTTPError> {
+fn parse_headers(
+    text: &str,
+) -> Result<(RequestType, String, String, HashMap<String, Header>), HTTPError> {
     let lines = text.split("\r\n").collect::<Vec<&str>>();
 
     let parts = lines[0]
@@ -58,7 +67,10 @@ fn parse_headers(text: &str) -> Result<(RequestType, String, String, Vec<Header>
         .collect::<Vec<&str>>();
 
     if parts.len() != 3 {
-        return Err(HTTPError::new(HTTPErrorKind::BadHeader, "Bad request line"));
+        return Err(HTTPError::new(
+            HTTPErrorKind::BadHeader,
+            "Bad request line, expected 3 items",
+        ));
     }
 
     let (reqtype, path, version) = match (parts[0], parts[1], parts[2]) {
@@ -84,19 +96,28 @@ fn parse_headers(text: &str) -> Result<(RequestType, String, String, Vec<Header>
         _ => return Err(HTTPError::new(HTTPErrorKind::BadHeader, "Malformed header")),
     };
 
-    let headers: Vec<Header> = lines[1..lines.len() - 3]
+    let headers: HashMap<String, Header> = lines[1..lines.len() - 3]
         .iter()
         .map(|l| parse_header_line(l))
-        .collect::<Result<Vec<Header>, HTTPError>>()?;
+        .collect::<Result<Vec<Header>, HTTPError>>()?
+        .into_iter()
+        .map(|h| (h.get_kind(), h))
+        .collect();
 
     Ok((reqtype, path, version, headers))
 }
 
-fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
+fn get_request(stream: &mut TcpStream) -> Result<Request, Error> {
     let mut buf = [0; BUF_SIZE];
 
     let mut msg = Vec::<u8>::new();
-    let (header_end, method, path, version, headers) = loop {
+    let (header_end, method, path, version, headers): (
+        usize,
+        RequestType,
+        String,
+        String,
+        HashMap<String, Header>,
+    ) = loop {
         let length = stream.read(&mut buf)?;
         if length == 0 {
             // TODO: BrokenPipe the right kind?
@@ -117,13 +138,10 @@ fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
         }
     };
 
-    let body_length: usize = headers
-        .iter()
-        .find_map(|h| match h {
-            Header::ContentLength(len) => Some(*len),
-            _ => None,
-        })
-        .unwrap_or(0);
+    let body_length: usize = match headers.get("Content-Length") {
+        Some(Header::ContentLength(len)) => *len,
+        _ => 0,
+    };
 
     while msg.len() < header_end + body_length {
         let length = stream.read(&mut buf)?;
@@ -135,15 +153,50 @@ fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
 
     let body = msg[header_end..].to_vec();
 
-    let req = Request {
+    Ok(Request {
         method,
         path,
         version,
         headers,
         body,
-    };
+    })
+}
 
-    println!("{}", req);
+// fn form_response(request: &Request) -> Response {}
+
+fn handle_connection(stream: &mut TcpStream) -> Result<(), Error> {
+    loop {
+        let request = match get_request(stream) {
+            Ok(r) => r,
+            Err(_) => {
+                let response = Response {
+                    version: "HTTP/1.1".to_string(),
+                    status_code: 400,
+                    headers: HashMap::new(),
+                    body: vec![],
+                };
+                stream.write_all(response.to_string().as_bytes());
+                break; // What if keepalive in broken request?
+            }
+        };
+
+        let response = Response {
+            version: "HTTP/1.1".to_string(),
+            status_code: 200,
+            headers: HashMap::new(),
+            body: vec![],
+        };
+        stream.write_all(response.to_string().as_bytes());
+
+        let connection_type = match request.headers.get("Connection") {
+            Some(Header::Connection(conntype)) => conntype,
+            _ => "close",
+        };
+
+        if connection_type == "close" {
+            break; // What if keepalive in broken request?
+        }
+    }
 
     Ok(())
 }

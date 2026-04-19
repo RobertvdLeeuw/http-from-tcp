@@ -1,4 +1,5 @@
 use regex::Regex;
+use std::collections::HashMap;
 use std::error;
 use std::fmt;
 use std::io::Error;
@@ -82,21 +83,25 @@ pub enum Header {
     UserAgent(String),
     Host(String),
     Connection(String),
+    Location(String),
+    ContentType(String),
 }
 
 impl fmt::Display for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let formatted = match self {
-            Header::Accept(query) => format!("Accept: {}", query),
-            Header::ContentLength(len) => format!("Content-Length: {}", len),
-            Header::AcceptLanguage(query) => format!("Accept-Language: {}", query),
-            Header::Authorization(query) => format!("Authorization: {}", query),
-            Header::Host(query) => format!("Host: {}", query),
-            Header::UserAgent(query) => format!("User-Agent: {}", query),
-            Header::Connection(conntype) => format!("Connection: {}", conntype),
+        let field = match self {
+            Header::Accept(query) => query,
+            Header::ContentLength(len) => &len.to_string(),
+            Header::AcceptLanguage(query) => query,
+            Header::Authorization(query) => query,
+            Header::Host(query) => query,
+            Header::UserAgent(query) => query,
+            Header::Connection(conntype) => conntype,
+            Header::Location(query) => query,
+            Header::ContentType(query) => query,
         };
 
-        write!(f, "{}", formatted)
+        write!(f, "{}: {}", self.get_kind(), field)
     }
 }
 
@@ -186,6 +191,21 @@ impl Header {
         }
         Ok(())
     }
+
+    pub fn get_kind(&self) -> String {
+        match self {
+            Header::Accept(_) => "Accept",
+            Header::ContentLength(_) => "Content-Length",
+            Header::AcceptLanguage(_) => "Accept-Language",
+            Header::Authorization(_) => "Authorization",
+            Header::UserAgent(_) => "User-Agent",
+            Header::Host(_) => "Host",
+            Header::Connection(_) => "Connection",
+            Header::Location(_) => "Location",
+            Header::ContentType(_) => "Content-Type",
+        }
+        .to_string()
+    }
 }
 
 pub struct Request {
@@ -193,7 +213,7 @@ pub struct Request {
     pub path: String,
     pub version: String,
 
-    pub headers: Vec<Header>, // TODO: Hash table
+    pub headers: HashMap<String, Header>,
     pub body: Vec<u8>,
 }
 
@@ -201,15 +221,72 @@ impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{} {} {}\n{}\nBody WIP (len {})",
+            "{} {} {}\r\n{}\r\n\r\nBody len {}",
             self.method,
             self.path,
             self.version,
             self.headers
-                .iter()
+                .values()
                 .map(|h| h.to_string())
                 .collect::<Vec<String>>()
-                .join("\n"),
+                .join("\r\n"),
+            self.body.len()
+        )
+    }
+}
+
+pub fn status_reason(code: u16) -> String {
+    match code {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+
+        301 => "Moved Permanently",
+        302 => "Found",
+
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        411 => "Length Required",
+        413 => "Content Too Large",
+        419 => "Too Many Requests",
+
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported",
+
+        _ => "",
+    }
+    .to_string()
+}
+
+pub struct Response {
+    pub version: String,
+    pub status_code: u16,
+    pub headers: HashMap<String, Header>,
+
+    pub body: Vec<u8>,
+}
+
+impl fmt::Display for Response {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {}\r\n{}\r\n\r\nBody len {}",
+            self.version,
+            self.status_code,
+            status_reason(self.status_code),
+            self.headers
+                .values()
+                .map(|h| h.to_string())
+                .collect::<Vec<String>>()
+                .join("\r\n"),
             self.body.len()
         )
     }

@@ -76,13 +76,184 @@ impl RequestType {
     }
 }
 
+pub struct HeaderParam {
+    key: Option<String>,
+    value: String,
+}
+
+impl fmt::Display for HeaderParam {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let formatted = match &self.key {
+            Some(k) => &format!("{}={}", k, self.value),
+            None => &self.value,
+        };
+
+        write!(f, "{}", formatted)
+    }
+}
+
+const RE_TOKEN_PATTERN: &str = r"[a-zA-Z0-9!#$%&'*+\-.^_`|~]+";
+
+// Sun, 06 Nov 1994 08:49:37 UTC
+const DATE_FORMAT: &str = "%a, %d %b %Y %H:%M:%S %Z";
+
+impl HeaderParam {
+    fn new(input: &str) -> Self {
+        let (key, value) = input
+            .split_once("=")
+            .map_or((None, input.to_string()), |(k, v)| {
+                (Some(k.to_string()), v.to_string())
+            });
+
+        HeaderParam { key, value }
+    }
+
+    fn validate(&self) -> Result<(), HTTPError> {
+        let re_token = Regex::new(RE_TOKEN_PATTERN).unwrap();
+
+        if let Some(key) = &self.key
+            && !re_token.is_match(&key)
+        {
+            return Err(HTTPError::new(
+                HTTPErrorKind::BadHeader,
+                format!("Invalid header param: '{}={}'", key, self.value),
+            ));
+        }
+
+        if !re_token.is_match(&self.value) {
+            return Err(HTTPError::new(
+                HTTPErrorKind::BadHeader,
+                format!("Invalid header param: '{}'", self.value),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+pub struct HeaderValue {
+    key: Option<String>,
+    value: String,
+    params: Vec<HeaderParam>,
+}
+
+impl fmt::Display for HeaderValue {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let formatted = match &self.key {
+            Some(k) => &format!("{}={}", k, self.value),
+            None => &self.value,
+        };
+
+        let params = self
+            .params
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<String>>()
+            .join(";");
+
+        write!(f, "{}{}", formatted, params)
+    }
+}
+
+impl HeaderValue {
+    fn new(input: &str) -> Self {
+        let (arg, params_raw) = input.split_once(";").map_or((input, ""), |(a, p)| (a, p));
+
+        let (key, value) = arg
+            .split_once("=")
+            .map_or((None, arg.to_string()), |(k, v)| {
+                (Some(k.to_string()), v.to_string())
+            });
+
+        let params: Vec<HeaderParam> = params_raw.split(";").map(|p| HeaderParam::new(p)).collect();
+
+        HeaderValue { key, value, params }
+    }
+
+    fn get_param(&self, key: &str) -> Option<&HeaderParam> {
+        self.params.iter().find(|p| p.key == Some(key.to_string()))
+    }
+
+    // This validation just does quick regex checks,
+    // invalid values (like nonexistent languages or params) aren't checked here.
+    fn validate(&self, value_pattern: Option<&Regex>) -> Result<(), HTTPError> {
+        let re_token = Regex::new(RE_TOKEN_PATTERN).unwrap();
+        let pattern = value_pattern.unwrap_or(&re_token);
+
+        if !pattern.is_match(&self.value) {
+            return Err(HTTPError::new(
+                HTTPErrorKind::BadHeader,
+                format!("Invalid header value '{}' in header '{}'", self.value, self),
+            ));
+        }
+
+        if let Some(key) = &self.key
+            && !re_token.is_match(key)
+        {
+            return Err(HTTPError::new(
+                HTTPErrorKind::BadHeader,
+                format!("Invalid header key '{key}' in header '{self}'"),
+            ));
+        }
+
+        match self.params.iter().find(|p| p.validate().is_err()) {
+            None => Ok(()),
+            Some(p) => Err(HTTPError::new(
+                HTTPErrorKind::BadHeader,
+                format!("Invalid header param '{p}' in header '{self}'"),
+            )),
+        }
+    }
+}
+
+pub struct HeaderValues(pub Vec<HeaderValue>);
+
+impl fmt::Display for HeaderValues {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            self.0
+                .iter()
+                .map(|hv| hv.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        )
+    }
+}
+
+impl HeaderValues {
+    fn new(line: &str, sep: Option<&str>) -> Result<Self, HTTPError> {
+        let separator = sep.unwrap_or(",");
+
+        let hvs = line
+            .split(separator)
+            .collect::<Vec<&str>>()
+            .iter()
+            .map(|hv| HeaderValue::new(hv.trim()))
+            .collect::<Result<Vec<HeaderValue>, HTTPError>>();
+
+        match hvs {
+            Ok(h) => Ok(HeaderValues(h)),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn validate(&self, value_pattern: Option<&Regex>) -> Result<(), HTTPError> {
+        self.0
+            .iter()
+            .find_map(|hv| hv.validate(value_pattern).err())
+            .map_or(Ok(()), Err)
+    }
+}
+
 pub enum Header {
     // Request
-    Accept(String),
-    AcceptLanguage(String),
+    Accept(HeaderValues),         // RFC 9110, 12.5.1
+    AcceptLanguage(HeaderValues), // RFC 9110, 12.5.4
     Authorization(String),
-    UserAgent(String),
-    Cookie(String),
+    UserAgent(HeaderValue), // RFC 9110, 10.1.5
+    Cookie(HeaderValues),   // RFC 6265, 5.4
     Referer(String),
     Origin(String),
     IfNoneMatch(String),
@@ -91,69 +262,67 @@ pub enum Header {
 
     // Response
     Location(String),
-    SetCookie(String),
+    SetCookie(HeaderValues), // RFC 6265, 4.1
     ContentEncoding(String),
     Server(String),
     AccessControlAllowOrigin(String),
-    AccessControlAllowMethods(String),
-    AccessControlAllowHeaders(String),
+    AccessControlAllowMethods(HeaderValues),
+    AccessControlAllowHeaders(HeaderValues),
     AccessControlMaxAge(String),
-    Allow(String),
+    Allow(HeaderValues), // RFC 9110, 10.2.1
     WWWAuthenticate(String),
     RetryAfter(String),
     ETag(String),
     LastModified(String),
     AcceptRanges(String),
     ContentRange(String),
-    Vary(String),
+    Vary(HeaderValues), // RFC 9110, 12.5.5
 
     // Both
     ContentLength(usize),
     Host(String),
     Connection(String),
-    ContentType(String),
+    ContentType(HeaderValue), // RFC 9110, 8.3
     Date(DateTime<Utc>),
-    TransferEncoding(String),
-    CacheControl(String),
+    TransferEncoding(HeaderValues),
+    CacheControl(HeaderValues),
 }
-
-// Sun, 06 Nov 1994 08:49:37 UTC
-const DATE_FORMAT: &str = "%a, %d %b %Y %H:%M:%S %Z";
 
 impl fmt::Display for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let field = match self {
-            Header::Accept(v)
-            | Header::AcceptLanguage(v)
-            | Header::Authorization(v)
-            | Header::Host(v)
-            | Header::UserAgent(v)
-            | Header::Connection(v)
-            | Header::Location(v)
-            | Header::ContentType(v)
-            | Header::Cookie(v)
-            | Header::Referer(v)
-            | Header::Origin(v)
-            | Header::IfNoneMatch(v)
-            | Header::IfModifiedSince(v)
-            | Header::Range(v)
-            | Header::SetCookie(v)
-            | Header::ContentEncoding(v)
-            | Header::Server(v)
-            | Header::AccessControlAllowOrigin(v)
-            | Header::AccessControlAllowMethods(v)
-            | Header::AccessControlAllowHeaders(v)
-            | Header::AccessControlMaxAge(v)
-            | Header::Allow(v)
-            | Header::WWWAuthenticate(v)
-            | Header::RetryAfter(v)
-            | Header::ETag(v)
-            | Header::LastModified(v)
-            | Header::AcceptRanges(v)
-            | Header::ContentRange(v)
-            | Header::Vary(v)
-            | Header::CacheControl(v)
-            | Header::TransferEncoding(v) => v,
+            Header::Accept(hvs)
+            | Header::AccessControlAllowMethods(hvs)
+            | Header::AccessControlAllowHeaders(hvs)
+            | Header::Allow(hvs)
+            | Header::Vary(hvs)
+            | Header::CacheControl(hvs)
+            | Header::SetCookie(hvs)
+            | Header::Cookie(hvs)
+            | Header::TransferEncoding(hvs)
+            | Header::AcceptLanguage(hvs) => &hvs.to_string(),
+
+            Header::UserAgent(hv) | Header::ContentType(hv) => &hv.to_string(),
+
+            Header::Authorization(s)
+            | Header::Host(s)
+            | Header::Connection(s)
+            | Header::Location(s)
+            | Header::Referer(s)
+            | Header::Origin(s)
+            | Header::IfNoneMatch(s)
+            | Header::IfModifiedSince(s)
+            | Header::Range(s)
+            | Header::ContentEncoding(s)
+            | Header::Server(s)
+            | Header::AccessControlAllowOrigin(s)
+            | Header::AccessControlMaxAge(s)
+            | Header::WWWAuthenticate(s)
+            | Header::RetryAfter(s)
+            | Header::ETag(s)
+            | Header::LastModified(s)
+            | Header::AcceptRanges(s)
+            | Header::ContentRange(s) => s,
 
             Header::ContentLength(len) => &len.to_string(),
             Header::Date(date) => &date.format(DATE_FORMAT).to_string(),
@@ -164,28 +333,89 @@ impl fmt::Display for Header {
 }
 
 impl Header {
+    pub fn new(line: &str) -> Result<Self, HTTPError> {
+        let re_header = Regex::new(r"^([a-zA-Z\-]+): +(.*)$").unwrap();
+        let Some((_, [field, value])) = re_header.captures(line).map(|caps| caps.extract()) else {
+            return Err(HTTPError::new(
+                HTTPErrorKind::BadHeader,
+                format!("Invalid format: '{line}'"),
+            ));
+        };
+
+        let header = match field {
+            "Accept" => Header::Accept(),
+            "Accept-Language" => Header::AcceptLanguage(),
+            "Authorization" => Header::Authorization(),
+            "User-Agent" => Header::UserAgent(),
+            "Cookie" => Header::Cookie(),
+            "Referer" => Header::Referer(),
+            "Origin" => Header::Origin(),
+            "If-None-Match" => Header::IfNoneMatch(),
+            "If-Modified-Since" => Header::IfModifiedSince(),
+            "Range" => Header::Range(),
+            "Location" => Header::Location(),
+            "Set-Cookie" => Header::SetCookie(),
+            "Content-Encoding" => Header::ContentEncoding(),
+            "Server" => Header::Server(),
+            "Access-Control-Allow-Origin" => Header::AccessControlAllowOrigin(),
+            "Access-Control-Allow-Methods" => Header::AccessControlAllowMethods(),
+            "Access-Control-Allow-Headers" => Header::AccessControlAllowHeaders(),
+            "Access-Control-Max-Age" => Header::AccessControlMaxAge(),
+            "Allow" => Header::Allow(),
+            "WWW-Authenticate" => Header::WWWAuthenticate(),
+            "Retry-After" => Header::RetryAfter(),
+            "ETag" => Header::ETag(),
+            "Last-Modified" => Header::LastModified(),
+            "Accept-Ranges" => Header::AcceptRanges(),
+            "Content-Range" => Header::ContentRange(),
+            "Vary" => Header::Vary(),
+            "Content-Length" => match value.parse::<usize>() {
+                Ok(l) => Header::ContentLength(l),
+                Err(_) => {
+                    return Err(HTTPError::new(
+                        HTTPErrorKind::BadHeader,
+                        format!("Malformed content length value: '{value}'"),
+                    ));
+                }
+            },
+            "Host" => Header::Host(),
+            "Connection" => Header::Connection(field.to_string()),
+            "Content-Type" => Header::ContentType(),
+            "Date" => Header::Date(),
+            "Transfer-Encoding" => Header::TransferEncoding(),
+            "Cache-Control" => Header::CacheControl(),
+
+            _ => {
+                return Err(HTTPError::new(
+                    HTTPErrorKind::BadHeader,
+                    format!("Unsupported header '{field}'"),
+                ));
+            }
+        };
+
+        match header.validate() {
+            Ok(_) => Ok(header),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), HTTPError> {
-        let re_token = Regex::new(r"[a-zA-Z0-9!#$%&'*+\-.^_`|~]").unwrap();
-        let re_param = Regex::new(&format!(r"({re_token}+={re_token}+)")).unwrap();
+        let re_token = Regex::new(RE_TOKEN_PATTERN).unwrap();
 
         match self {
-            Header::Accept(query) => {
-                let re_mime_type = format!(r"(\*|{re_token}+)");
-                let re_media_range =
-                    Regex::new(&format!(r"{re_mime_type}/{re_mime_type}(; ?{re_param})+")).unwrap();
-                let re_accept_value =
-                    Regex::new(&format!(r"^{re_media_range}( ?, ?{re_media_range})*$")).unwrap();
-
-                if !re_accept_value.is_match(query) {
-                    for specifier in query.split(",").collect::<Vec<&str>>() {
-                        if !re_media_range.is_match(specifier) {
-                            return Err(HTTPError::new(
-                                HTTPErrorKind::BadHeader,
-                                format!("Invalid accept field specifier: '{specifier}'"),
-                            ));
-                        }
-                    }
-                }
+            Header::AcceptLanguage(hvs)
+            | Header::Vary(hvs)
+            | Header::SetCookie(hvs)
+            | Header::Cookie(hvs) => {
+                return hvs.validate(None);
+            }
+            Header::ContentType(hv) => {
+                let re_content_type = Regex::new(&format!(r"^{re_token}/{re_token}$")).unwrap();
+                return hv.validate(Some(&re_content_type));
+            }
+            Header::Accept(hvs) => {
+                let re_media_type = Regex::new(&format!(r"^{re_token}/{re_token}$")).unwrap();
+                return hvs.validate(Some(&re_media_type));
             }
             Header::Host(query) => {
                 let re_255 = r"(2[0-5][0-5])|(1?[0-9]{1,2})";
@@ -203,23 +433,6 @@ impl Header {
                     ));
                 }
             }
-            Header::AcceptLanguage(query) => {
-                let re_lang_option =
-                    Regex::new(&format!(r"{re_token}{{2,}}(; ?{re_param})*")).unwrap();
-                let re_lang_value =
-                    Regex::new(&format!(r"^{re_lang_option}( ?, ?{re_lang_option})*$")).unwrap();
-
-                if !re_lang_value.is_match(query) {
-                    for specifier in query.split(", ").collect::<Vec<&str>>() {
-                        if !re_lang_option.is_match(specifier) {
-                            return Err(HTTPError::new(
-                                HTTPErrorKind::BadHeader,
-                                format!("Invalid language specifier: '{specifier}'"),
-                            ));
-                        }
-                    }
-                }
-            }
             Header::Connection(conntype) => {
                 if conntype != "keep-alive" && conntype != "close" {
                     return Err(HTTPError::new(
@@ -228,27 +441,19 @@ impl Header {
                     ));
                 }
             }
-            Header::UserAgent(query) => {
-                let re_product = Regex::new(&format!(r"{re_token}+(/{re_token}+)?")).unwrap();
+            Header::Allow(hvs) => {
+                let re_method = Regex::new(r"(PUT)|(POST)|(GET)|(UPDATE)").unwrap();
+                return hvs.validate(Some(&re_method));
+            }
+            Header::UserAgent(hv) => {
+                let re_product = Regex::new(&format!(r"{re_token}(/{re_token})?")).unwrap();
                 // TODO: Comments in user agent.
                 let re_user_agent_value =
                     Regex::new(&format!(r"{re_product}( {re_product})*")).unwrap();
 
-                if !re_user_agent_value.is_match(query) {
-                    for specifier in query.split(" ").collect::<Vec<&str>>() {
-                        if !re_product.is_match(specifier) {
-                            return Err(HTTPError::new(
-                                HTTPErrorKind::BadHeader,
-                                format!("Invalid user agent: '{specifier}'"),
-                            ));
-                        }
-                    }
-                }
+                return hv.validate(Some(&re_user_agent_value));
             }
-            Header::SetCookie(query) => {
-                let re_cookie_pair = Regex::new(&format!(r"")).unwrap();
-            }
-            _ => {} // No string validation needed.
+            _ => {}
         }
         Ok(())
     }

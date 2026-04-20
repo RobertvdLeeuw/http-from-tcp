@@ -19,46 +19,7 @@ const HEADER_END: &[u8] = b"\r\n\r\n";
 // Tests
 //  Serialize-deserialize loop
 
-fn parse_header_line(line: &str) -> Result<Header, HTTPError> {
-    let re_header = Regex::new(r"^([a-zA-Z\-]+): +(.*)$").unwrap();
-    let Some((_, [field, value])) = re_header.captures(line).map(|caps| caps.extract()) else {
-        return Err(HTTPError::new(
-            HTTPErrorKind::BadHeader,
-            format!("Invalid format: '{line}'"),
-        ));
-    };
-
-    let header = match field {
-        "Accept" => Header::Accept(field.to_string()),
-        "Accept-Language" => Header::AcceptLanguage(field.to_string()),
-        "Authorization" => Header::Authorization(field.to_string()),
-        "Host" => Header::Host(field.to_string()),
-        "User-Agent" => Header::UserAgent(field.to_string()),
-        "Connection" => Header::Connection(field.to_string()),
-
-        "Content-Length" => match value.parse::<usize>() {
-            Ok(l) => Header::ContentLength(l),
-            Err(_) => {
-                return Err(HTTPError::new(
-                    HTTPErrorKind::BadHeader,
-                    format!("Malformed content length value: '{value}'"),
-                ));
-            }
-        },
-
-        _ => {
-            return Err(HTTPError::new(
-                HTTPErrorKind::BadHeader,
-                format!("Unsupported header '{field}'"),
-            ));
-        }
-    };
-
-    match header.validate() {
-        Ok(_) => Ok(header),
-        Err(e) => Err(e),
-    }
-}
+// TODO: Header::new(line)
 
 fn parse_headers(
     text: &str,
@@ -96,7 +57,7 @@ fn parse_headers(
 
     let headers: HashMap<String, Header> = lines[1..lines.len() - 3]
         .iter()
-        .map(|l| parse_header_line(l))
+        .map(|l| Header::new(l))
         .collect::<Result<Vec<Header>, HTTPError>>()?
         .into_iter()
         .map(|h| (h.get_kind(), h))

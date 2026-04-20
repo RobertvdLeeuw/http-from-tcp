@@ -14,6 +14,8 @@ const BUF_SIZE: usize = 12;
 const HEADER_END: &[u8] = b"\r\n\r\n";
 
 // TODO:
+// Setup new headers
+// Some way to bind handlers to paths
 // Tests
 //  Serialize-deserialize loop
 
@@ -196,11 +198,12 @@ fn get_request(stream: &mut TcpStream) -> Result<Option<Request>, Error> {
 
 fn form_response(request: &Request) -> Response {
     let headers = HashMap::from([("Date".to_string(), Header::Date(Utc::now()))]);
+    let version = "HTTP/1.1".to_string();
 
     if request.version != "HTTP/1.1" {
         info!("Request for unsupported HTTP version: {}", request.version);
         return Response {
-            version: "HTTP/1.1".to_string(),
+            version,
             status_code: 505,
             headers,
             body: vec![],
@@ -210,7 +213,7 @@ fn form_response(request: &Request) -> Response {
     if request.headers.contains_key("Transfer-Encoding") {
         info!("Request with chunked data");
         return Response {
-            version: "HTTP/1.1".to_string(),
+            version,
             status_code: 501,
             headers,
             body: vec![],
@@ -218,7 +221,7 @@ fn form_response(request: &Request) -> Response {
     }
 
     Response {
-        version: "HTTP/1.1".to_string(),
+        version,
         status_code: 200,
         headers,
         body: vec![],

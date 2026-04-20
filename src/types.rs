@@ -1,4 +1,3 @@
-use chrono::Date;
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use std::collections::HashMap;
@@ -83,9 +82,30 @@ pub enum Header {
     AcceptLanguage(String),
     Authorization(String),
     UserAgent(String),
+    Cookie(String),
+    Referer(String),
+    Origin(String),
+    IfNoneMatch(String),
+    IfModifiedSince(String),
+    Range(String),
 
     // Response
     Location(String),
+    SetCookie(String),
+    ContentEncoding(String),
+    Server(String),
+    AccessControlAllowOrigin(String),
+    AccessControlAllowMethods(String),
+    AccessControlAllowHeaders(String),
+    AccessControlMaxAge(String),
+    Allow(String),
+    WWWAuthenticate(String),
+    RetryAfter(String),
+    ETag(String),
+    LastModified(String),
+    AcceptRanges(String),
+    ContentRange(String),
+    Vary(String),
 
     // Both
     ContentLength(usize),
@@ -94,22 +114,49 @@ pub enum Header {
     ContentType(String),
     Date(DateTime<Utc>),
     TransferEncoding(String),
+    CacheControl(String),
 }
+
+// Sun, 06 Nov 1994 08:49:37 UTC
+const DATE_FORMAT: &str = "%a, %d %b %Y %H:%M:%S %Z";
 
 impl fmt::Display for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let field = match self {
-            Header::Accept(query) => query,
+            Header::Accept(v)
+            | Header::AcceptLanguage(v)
+            | Header::Authorization(v)
+            | Header::Host(v)
+            | Header::UserAgent(v)
+            | Header::Connection(v)
+            | Header::Location(v)
+            | Header::ContentType(v)
+            | Header::Cookie(v)
+            | Header::Referer(v)
+            | Header::Origin(v)
+            | Header::IfNoneMatch(v)
+            | Header::IfModifiedSince(v)
+            | Header::Range(v)
+            | Header::SetCookie(v)
+            | Header::ContentEncoding(v)
+            | Header::Server(v)
+            | Header::AccessControlAllowOrigin(v)
+            | Header::AccessControlAllowMethods(v)
+            | Header::AccessControlAllowHeaders(v)
+            | Header::AccessControlMaxAge(v)
+            | Header::Allow(v)
+            | Header::WWWAuthenticate(v)
+            | Header::RetryAfter(v)
+            | Header::ETag(v)
+            | Header::LastModified(v)
+            | Header::AcceptRanges(v)
+            | Header::ContentRange(v)
+            | Header::Vary(v)
+            | Header::CacheControl(v)
+            | Header::TransferEncoding(v) => v,
+
             Header::ContentLength(len) => &len.to_string(),
-            Header::AcceptLanguage(query) => query,
-            Header::Authorization(query) => query,
-            Header::Host(query) => query,
-            Header::UserAgent(query) => query,
-            Header::Connection(conntype) => conntype,
-            Header::Location(query) => query,
-            Header::ContentType(query) => query,
-            Header::Date(date) => &date.format("%a, %d %b %Y %H:%M:%S %Z").to_string(),
-            Header::TransferEncoding(query) => query,
+            Header::Date(date) => &date.format(DATE_FORMAT).to_string(),
         };
 
         write!(f, "{}: {}", self.get_kind(), field)
@@ -198,6 +245,9 @@ impl Header {
                     }
                 }
             }
+            Header::SetCookie(query) => {
+                let re_cookie_pair = Regex::new(&format!(r"")).unwrap();
+            }
             _ => {} // No string validation needed.
         }
         Ok(())
@@ -206,16 +256,38 @@ impl Header {
     pub fn get_kind(&self) -> String {
         match self {
             Header::Accept(_) => "Accept",
-            Header::ContentLength(_) => "Content-Length",
             Header::AcceptLanguage(_) => "Accept-Language",
             Header::Authorization(_) => "Authorization",
             Header::UserAgent(_) => "User-Agent",
+            Header::Cookie(_) => "Cookie",
+            Header::Referer(_) => "Referer",
+            Header::Origin(_) => "Origin",
+            Header::IfNoneMatch(_) => "If-None-Match",
+            Header::IfModifiedSince(_) => "If-Modified-Since",
+            Header::Range(_) => "Range",
+            Header::Location(_) => "Location",
+            Header::SetCookie(_) => "Set-Cookie",
+            Header::ContentEncoding(_) => "Content-Encoding",
+            Header::Server(_) => "Server",
+            Header::AccessControlAllowOrigin(_) => "Access-Control-Allow-Origin",
+            Header::AccessControlAllowMethods(_) => "Access-Control-Allow-Methods",
+            Header::AccessControlAllowHeaders(_) => "Access-Control-Allow-Headers",
+            Header::AccessControlMaxAge(_) => "Access-Control-Max-Age",
+            Header::Allow(_) => "Allow",
+            Header::WWWAuthenticate(_) => "WWW-Authenticate",
+            Header::RetryAfter(_) => "Retry-After",
+            Header::ETag(_) => "ETag",
+            Header::LastModified(_) => "Last-Modified",
+            Header::AcceptRanges(_) => "Accept-Ranges",
+            Header::ContentRange(_) => "Content-Range",
+            Header::Vary(_) => "Vary",
+            Header::ContentLength(_) => "Content-Length",
             Header::Host(_) => "Host",
             Header::Connection(_) => "Connection",
-            Header::Location(_) => "Location",
             Header::ContentType(_) => "Content-Type",
             Header::Date(_) => "Date",
             Header::TransferEncoding(_) => "Transfer-Encoding",
+            Header::CacheControl(_) => "Cache-Control",
         }
         .to_string()
     }
